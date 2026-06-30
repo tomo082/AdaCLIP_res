@@ -1,4 +1,5 @@
 from typing import Union, List, Optional
+import json
 import numpy as np
 import torch
 from pkg_resources import packaging
@@ -232,6 +233,107 @@ class TextEmbebddingLayer(nn.Module):
         return text_features
 
 
+class JsonPromptTextEmbeddingLayer(nn.Module):
+    def __init__(self, fixed, prompt_json_path, prompt_fallback="default"):
+        super(JsonPromptTextEmbeddingLayer, self).__init__()
+        if prompt_fallback not in ("default", "error"):
+            raise ValueError("--prompt_fallback must be 'default' or 'error'")
+        if not prompt_json_path:
+            raise ValueError("--prompt_json_path is required when --prompt_source json")
+
+        self.fixed = fixed
+        self.prompt_json_path = prompt_json_path
+        self.prompt_fallback = prompt_fallback
+        self.default_layer = TextEmbebddingLayer(fixed=fixed)
+        self.ensemble_text_features = {}
+        self._printed_classes = set()
+
+        with open(prompt_json_path, "r", encoding="utf-8") as handle:
+            self.prompt_bank = json.load(handle)
+        if not isinstance(self.prompt_bank, dict):
+            raise ValueError(f"Prompt JSON must be a dict keyed by class name: {prompt_json_path}")
+
+        self._normalized_prompt_bank = {
+            self._normalize_class_name(class_name): prompts
+            for class_name, prompts in self.prompt_bank.items()
+        }
+
+    @staticmethod
+    def _normalize_class_name(class_name):
+        return str(class_name).replace("-", " ").replace("_", " ").strip().lower()
+
+    def _get_prompts(self, class_name):
+        normalized = self._normalize_class_name(class_name)
+        prompts = self._normalized_prompt_bank.get(normalized)
+        if prompts is None:
+            if self.prompt_fallback == "default":
+                return None
+            raise KeyError(f"Class '{class_name}' is missing in prompt JSON: {self.prompt_json_path}")
+
+        normal_prompts = prompts.get("normal_prompts", [])
+        abnormal_prompts = prompts.get("abnormal_prompts", [])
+        if not normal_prompts or not abnormal_prompts:
+            if self.prompt_fallback == "default":
+                return None
+            raise ValueError(
+                f"Class '{class_name}' requires non-empty normal_prompts and abnormal_prompts "
+                f"in prompt JSON: {self.prompt_json_path}"
+            )
+        return normal_prompts, abnormal_prompts
+
+    def _should_use_cache(self, model):
+        # Dynamic text prompts are image-dependent, so class-only cached features would be stale.
+        dynamic_text_prompt = (
+            getattr(model, "enable_text_prompt", False)
+            and "D" in getattr(model, "prompting_type", "")
+        )
+        return self.fixed or not dynamic_text_prompt
+
+    def forward(self, model, texts, device):
+        text_feature_list = []
+        use_cache = self._should_use_cache(model)
+
+        for text in texts:
+            if use_cache and self.ensemble_text_features.get(text) is not None:
+                text_features = self.ensemble_text_features[text]
+            else:
+                text_features = self.encode_text(model, text, device)
+                self.ensemble_text_features[text] = text_features
+            text_feature_list.append(text_features)
+
+        text_features = torch.stack(text_feature_list, dim=0)
+        text_features = F.normalize(text_features, dim=1)
+        return text_features
+
+    def encode_text(self, model, text, device):
+        prompt_pair = self._get_prompts(text)
+        if prompt_pair is None:
+            if text not in self._printed_classes:
+                print(f"[JsonPrompt] {text}: missing prompts, fallback to default TextEmbebddingLayer")
+                self._printed_classes.add(text)
+            return self.default_layer.encode_text(model, text, device)
+
+        normal_prompts, abnormal_prompts = prompt_pair
+        if text not in self._printed_classes:
+            print(
+                f"[JsonPrompt] {text}: {len(normal_prompts)} normal prompts, "
+                f"{len(abnormal_prompts)} abnormal prompts"
+            )
+            self._printed_classes.add(text)
+
+        text_features = []
+        for prompts in (normal_prompts, abnormal_prompts):
+            tokenized = self.default_layer.tokenize(prompts, context_length=77).to(device)
+            class_embeddings = model.encode_text(tokenized)
+            class_embeddings = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
+            class_embedding = class_embeddings.mean(dim=0)
+            class_embedding = class_embedding / class_embedding.norm()
+            text_features.append(class_embedding)
+
+        text_features = torch.stack(text_features, dim=1)
+        return text_features
+
+
 # Note: the implementation of HSF is slightly different to the reported one, since we found that the upgraded one is more stable.
 class HybridSemanticFusion(nn.Module):
     def __init__(self, k_clusters):
@@ -335,7 +437,8 @@ class AdaCLIP(nn.Module):
     def __init__(self, freeze_clip: CLIP, text_channel: int, visual_channel: int,
                  prompting_length: int, prompting_depth: int, prompting_branch: str, prompting_type: str,
                  use_hsf: bool, k_clusters: int,
-                 output_layers: list, device: str, image_size: int):
+                 output_layers: list, device: str, image_size: int,
+                 prompt_source: str = "default", prompt_json_path: str = "", prompt_fallback: str = "default"):
         super(AdaCLIP, self).__init__()
         self.freeze_clip = freeze_clip
 
@@ -366,7 +469,19 @@ class AdaCLIP(nn.Module):
         else:
             self.enable_visual_prompt = False
 
-        self.text_embedding_layer = TextEmbebddingLayer(fixed=(not self.enable_text_prompt))
+        self.prompt_source = prompt_source
+        self.prompt_json_path = prompt_json_path
+        self.prompt_fallback = prompt_fallback
+        if prompt_source == "default":
+            self.text_embedding_layer = TextEmbebddingLayer(fixed=(not self.enable_text_prompt))
+        elif prompt_source == "json":
+            self.text_embedding_layer = JsonPromptTextEmbeddingLayer(
+                fixed=(not self.enable_text_prompt),
+                prompt_json_path=prompt_json_path,
+                prompt_fallback=prompt_fallback,
+            )
+        else:
+            raise ValueError(f"Unsupported prompt_source: {prompt_source}")
         self.text_prompter = PromptLayer(text_channel, prompting_length, prompting_depth, is_text=True,
                                          prompting_type=prompting_type,
                                          enabled=self.enable_text_prompt)

@@ -21,6 +21,7 @@ class AdaCLIP_Trainer(nn.Module):
             prompting_depth=3, prompting_length=2,
             prompting_branch='VL', prompting_type='SD',
             use_hsf=True, k_clusters=20,
+            prompt_source='default', prompt_json_path='', prompt_fallback='default',
     ):
 
         super(AdaCLIP_Trainer, self).__init__()
@@ -51,7 +52,10 @@ class AdaCLIP_Trainer(nn.Module):
                                   k_clusters=k_clusters,
                                   output_layers=feat_list,
                                   device=device,
-                                  image_size=image_size).to(device)
+                                  image_size=image_size,
+                                  prompt_source=prompt_source,
+                                  prompt_json_path=prompt_json_path,
+                                  prompt_fallback=prompt_fallback).to(device)
 
         self.transform = transforms.Compose([
             transforms.Resize((image_size, image_size)),
