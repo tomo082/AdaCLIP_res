@@ -312,6 +312,44 @@ class JsonPromptTextEmbeddingLayer(nn.Module):
         return []
 
     @staticmethod
+    def _strip_json_code_fence(text):
+        text = text.strip()
+        if not text.startswith("```"):
+            return text
+
+        lines = text.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+
+    @classmethod
+    def _normal_prompts_from_response(cls, response):
+        prompts = []
+        for item in cls._as_prompt_list(response):
+            text = cls._strip_json_code_fence(item)
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                prompts.extend(cls._as_prompt_list(item))
+                continue
+
+            if isinstance(parsed, dict):
+                nested_prompts = cls._as_prompt_list(parsed.get("normal_prompts"))
+                if nested_prompts:
+                    prompts.extend(nested_prompts)
+                else:
+                    prompts.extend(cls._as_prompt_list(item))
+            elif isinstance(parsed, list):
+                for parsed_item in parsed:
+                    if isinstance(parsed_item, dict):
+                        prompts.extend(cls._as_prompt_list(parsed_item.get("normal_prompts")))
+                    else:
+                        prompts.extend(cls._as_prompt_list(parsed_item))
+        return prompts
+
+    @staticmethod
     def _add_prompt_record(prompt_bank, class_name, normal_prompts, abnormal_prompts=None):
         normal_prompts = JsonPromptTextEmbeddingLayer._as_prompt_list(normal_prompts)
         abnormal_prompts = JsonPromptTextEmbeddingLayer._as_prompt_list(abnormal_prompts)
@@ -349,13 +387,18 @@ class JsonPromptTextEmbeddingLayer(nn.Module):
         if class_name is not None:
             mode = str(record.get("mode", "")).lower()
             if "abnormal" not in mode:
+                normal_prompts = (
+                    record.get("normal_prompt")
+                    or record.get("normal")
+                    or record.get("normal_prompts")
+                    or record.get("responses")
+                )
+                if normal_prompts is None and record.get("response") is not None:
+                    normal_prompts = self._normal_prompts_from_response(record.get("response"))
                 self._add_prompt_record(
                     prompt_bank,
                     class_name,
-                    record.get("normal_prompt")
-                    or record.get("normal")
-                    or record.get("responses")
-                    or record.get("response"),
+                    normal_prompts,
                     record.get("abnormal_prompt") or record.get("abnormal"),
                 )
             return
