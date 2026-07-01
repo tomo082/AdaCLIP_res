@@ -248,10 +248,7 @@ class JsonPromptTextEmbeddingLayer(nn.Module):
         self.ensemble_text_features = {}
         self._printed_classes = set()
 
-        with open(prompt_json_path, "r", encoding="utf-8") as handle:
-            self.prompt_bank = json.load(handle)
-        if not isinstance(self.prompt_bank, dict):
-            raise ValueError(f"Prompt JSON must be a dict keyed by class name: {prompt_json_path}")
+        self.prompt_bank = self._load_prompt_bank(prompt_json_path)
 
         self._normalized_prompt_bank = {
             self._normalize_class_name(class_name): prompts
@@ -261,6 +258,64 @@ class JsonPromptTextEmbeddingLayer(nn.Module):
     @staticmethod
     def _normalize_class_name(class_name):
         return str(class_name).replace("-", " ").replace("_", " ").strip().lower()
+
+    def _load_prompt_bank(self, prompt_json_path):
+        with open(prompt_json_path, "r", encoding="utf-8") as handle:
+            content = handle.read()
+
+        try:
+            prompt_data = json.loads(content)
+        except json.JSONDecodeError:
+            prompt_data = self._load_multiple_json_objects(content, prompt_json_path)
+
+        prompt_bank = {}
+        self._merge_prompt_records(prompt_data, prompt_bank)
+        if not prompt_bank:
+            raise ValueError(
+                "Prompt JSON must contain class-keyed prompts or records with class_name/name/class "
+                f"and normal_prompts: {prompt_json_path}"
+            )
+        return prompt_bank
+
+    @staticmethod
+    def _load_multiple_json_objects(content, prompt_json_path):
+        decoder = json.JSONDecoder()
+        records = []
+        idx = 0
+        length = len(content)
+        while idx < length:
+            while idx < length and content[idx].isspace():
+                idx += 1
+            if idx >= length:
+                break
+            try:
+                record, idx = decoder.raw_decode(content, idx)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Failed to parse prompt JSON/JSONL near char {idx}: {prompt_json_path}"
+                ) from exc
+            records.append(record)
+        return records
+
+    def _merge_prompt_records(self, record, prompt_bank):
+        if isinstance(record, list):
+            for item in record:
+                self._merge_prompt_records(item, prompt_bank)
+            return
+
+        if not isinstance(record, dict):
+            return
+
+        if "normal_prompts" in record:
+            class_name = record.get("class_name") or record.get("name") or record.get("class")
+            if class_name is None:
+                raise ValueError("Prompt records with normal_prompts must include class_name, name, or class")
+            prompt_bank[class_name] = record
+            return
+
+        for class_name, prompts in record.items():
+            if isinstance(prompts, dict):
+                prompt_bank[class_name] = prompts
 
     def _get_prompts(self, class_name):
         normalized = self._normalize_class_name(class_name)
