@@ -272,8 +272,8 @@ class JsonPromptTextEmbeddingLayer(nn.Module):
         self._merge_prompt_records(prompt_data, prompt_bank)
         if not prompt_bank:
             raise ValueError(
-                "Prompt JSON must contain class-keyed prompts or records with class_name/name/class "
-                f"and normal_prompts: {prompt_json_path}"
+                "Prompt JSON must contain class-keyed prompts, records with class_name/name/class "
+                f"and normal_prompts, or LLaVA rows with class_name and response: {prompt_json_path}"
             )
         return prompt_bank
 
@@ -297,6 +297,33 @@ class JsonPromptTextEmbeddingLayer(nn.Module):
             records.append(record)
         return records
 
+    @staticmethod
+    def _as_prompt_list(value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = value.strip()
+            return [value] if value else []
+        if isinstance(value, list):
+            prompts = []
+            for item in value:
+                prompts.extend(JsonPromptTextEmbeddingLayer._as_prompt_list(item))
+            return prompts
+        return []
+
+    @staticmethod
+    def _add_prompt_record(prompt_bank, class_name, normal_prompts, abnormal_prompts=None):
+        normal_prompts = JsonPromptTextEmbeddingLayer._as_prompt_list(normal_prompts)
+        abnormal_prompts = JsonPromptTextEmbeddingLayer._as_prompt_list(abnormal_prompts)
+        if not normal_prompts and not abnormal_prompts:
+            return
+
+        if class_name not in prompt_bank:
+            prompt_bank[class_name] = {"normal_prompts": [], "abnormal_prompts": []}
+
+        prompt_bank[class_name]["normal_prompts"].extend(normal_prompts)
+        prompt_bank[class_name]["abnormal_prompts"].extend(abnormal_prompts)
+
     def _merge_prompt_records(self, record, prompt_bank):
         if isinstance(record, list):
             for item in record:
@@ -310,12 +337,36 @@ class JsonPromptTextEmbeddingLayer(nn.Module):
             class_name = record.get("class_name") or record.get("name") or record.get("class")
             if class_name is None:
                 raise ValueError("Prompt records with normal_prompts must include class_name, name, or class")
-            prompt_bank[class_name] = record
+            self._add_prompt_record(
+                prompt_bank,
+                class_name,
+                record.get("normal_prompts"),
+                record.get("abnormal_prompts"),
+            )
+            return
+
+        class_name = record.get("class_name") or record.get("name") or record.get("class")
+        if class_name is not None:
+            mode = str(record.get("mode", "")).lower()
+            if "abnormal" not in mode:
+                self._add_prompt_record(
+                    prompt_bank,
+                    class_name,
+                    record.get("normal_prompt")
+                    or record.get("normal")
+                    or record.get("responses")
+                    or record.get("response"),
+                    record.get("abnormal_prompt") or record.get("abnormal"),
+                )
             return
 
         for class_name, prompts in record.items():
             if isinstance(prompts, dict):
-                prompt_bank[class_name] = prompts
+                prompts = dict(prompts)
+                prompts.setdefault("class_name", class_name)
+                self._merge_prompt_records(prompts, prompt_bank)
+            elif isinstance(prompts, (str, list)):
+                self._add_prompt_record(prompt_bank, class_name, prompts)
 
     def _get_prompts(self, class_name):
         normalized = self._normalize_class_name(class_name)
