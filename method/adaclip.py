@@ -271,15 +271,32 @@ class JsonPromptTextEmbeddingLayer(nn.Module):
             raise KeyError(f"Class '{class_name}' is missing in prompt JSON: {self.prompt_json_path}")
 
         normal_prompts = prompts.get("normal_prompts", [])
-        abnormal_prompts = prompts.get("abnormal_prompts", [])
-        if not normal_prompts or not abnormal_prompts:
+        abnormal_prompts = prompts.get("abnormal_prompts", None)
+        if not normal_prompts:
             if self.prompt_fallback == "default":
                 return None
             raise ValueError(
-                f"Class '{class_name}' requires non-empty normal_prompts and abnormal_prompts "
+                f"Class '{class_name}' requires non-empty normal_prompts "
                 f"in prompt JSON: {self.prompt_json_path}"
             )
         return normal_prompts, abnormal_prompts
+
+    def _build_default_abnormal_prompts(self, text):
+        text = text.replace("-", " ").replace("_", " ")
+        prompted_state = [state.format(text) for state in self.default_layer.prompt_abnormal]
+        prompted_sentence = []
+        for state in prompted_state:
+            for template in self.default_layer.prompt_templates:
+                prompted_sentence.append(template.format(state))
+        return prompted_sentence
+
+    def _encode_prompt_list(self, model, prompt_list, device):
+        tokenized = self.default_layer.tokenize(prompt_list, context_length=77).to(device)
+        class_embeddings = model.encode_text(tokenized)
+        class_embeddings = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
+        class_embedding = class_embeddings.mean(dim=0)
+        class_embedding = class_embedding / class_embedding.norm()
+        return class_embedding
 
     def _should_use_cache(self, model):
         # Dynamic text prompts are image-dependent, so class-only cached features would be stale.
@@ -314,21 +331,23 @@ class JsonPromptTextEmbeddingLayer(nn.Module):
             return self.default_layer.encode_text(model, text, device)
 
         normal_prompts, abnormal_prompts = prompt_pair
+        if abnormal_prompts is None or len(abnormal_prompts) == 0:
+            abnormal_prompts = self._build_default_abnormal_prompts(text)
+            abnormal_source = "default abnormal prompts"
+        else:
+            abnormal_source = "json abnormal prompts"
+
         if text not in self._printed_classes:
             print(
                 f"[JsonPrompt] {text}: {len(normal_prompts)} normal prompts, "
-                f"{len(abnormal_prompts)} abnormal prompts"
+                f"{len(abnormal_prompts)} abnormal prompts ({abnormal_source})"
             )
             self._printed_classes.add(text)
 
-        text_features = []
-        for prompts in (normal_prompts, abnormal_prompts):
-            tokenized = self.default_layer.tokenize(prompts, context_length=77).to(device)
-            class_embeddings = model.encode_text(tokenized)
-            class_embeddings = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
-            class_embedding = class_embeddings.mean(dim=0)
-            class_embedding = class_embedding / class_embedding.norm()
-            text_features.append(class_embedding)
+        text_features = [
+            self._encode_prompt_list(model, normal_prompts, device),
+            self._encode_prompt_list(model, abnormal_prompts, device),
+        ]
 
         text_features = torch.stack(text_features, dim=1)
         return text_features
