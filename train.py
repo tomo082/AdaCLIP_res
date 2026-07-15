@@ -65,6 +65,13 @@ def train(args):
         prompt_source=args.prompt_source,
         prompt_json_path=args.prompt_json_path,
         prompt_fallback=args.prompt_fallback,
+        train_abnormal_prompt_source=args.train_abnormal_prompt_source,
+        test_abnormal_prompt_source=args.test_abnormal_prompt_source,
+        train_abnormal_prompt_json_path=args.train_abnormal_prompt_json_path,
+        test_abnormal_prompt_json_path=args.test_abnormal_prompt_json_path,
+        abnormal_prompt_mode=args.abnormal_prompt_mode,
+        abnormal_prompt_fallback=args.abnormal_prompt_fallback,
+        json_prompt_debug_limit=args.json_prompt_debug_limit,
     ).to(device)
 
     train_data_cls_names, train_data, train_data_root = get_data(
@@ -134,6 +141,17 @@ def train(args):
 def str2bool(v):
     return v.lower() in ("yes", "true", "t", "1")
 
+def validate_abnormal_prompt_args(args):
+    for phase in ("train", "test"):
+        source = getattr(args, f"{phase}_abnormal_prompt_source")
+        json_path = getattr(args, f"{phase}_abnormal_prompt_json_path")
+        if source == "json":
+            if not json_path:
+                raise ValueError(f"--{phase}_abnormal_prompt_json_path is required when "
+                                 f"--{phase}_abnormal_prompt_source json")
+            if not os.path.isfile(json_path):
+                raise FileNotFoundError(f"{phase} abnormal prompt JSON does not exist: {json_path}")
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser("AdaCLIP", add_help=True)
 
@@ -180,8 +198,27 @@ if __name__ == '__main__':
                         help="Path to JSON prompts used when --prompt_source json")
     parser.add_argument("--prompt_fallback", type=str, default="default", choices=["default", "error"],
                         help="Fallback behavior when class prompts are missing from JSON")
+    parser.add_argument("--train_abnormal_prompt_source", type=str, default="default",
+                        choices=["default", "json"],
+                        help="Abnormal prompt source used during training.")
+    parser.add_argument("--test_abnormal_prompt_source", type=str, default="default",
+                        choices=["default", "json"],
+                        help="Abnormal prompt source used during validation/testing.")
+    parser.add_argument("--train_abnormal_prompt_json_path", type=str, default="",
+                        help="Per-image difference prompt JSON used during training.")
+    parser.add_argument("--test_abnormal_prompt_json_path", type=str, default="",
+                        help="Per-image difference prompt JSON used during validation/testing.")
+    parser.add_argument("--abnormal_prompt_mode", type=str, default="replace",
+                        choices=["replace", "append"],
+                        help="Use JSON abnormal prompts alone or append them to default abnormal prompts.")
+    parser.add_argument("--abnormal_prompt_fallback", type=str, default="default",
+                        choices=["default", "error"],
+                        help="Fallback when per-image JSON difference prompts are missing.")
+    parser.add_argument("--json_prompt_debug_limit", type=int, default=5,
+                        help="Number of per-image JSON prompt resolutions to print for debugging.")
 
     args = parser.parse_args()
+    validate_abnormal_prompt_args(args)
 
     if args.batch_size != 1:
         raise NotImplementedError(
