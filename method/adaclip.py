@@ -7,6 +7,7 @@ from torch import nn
 from torch.nn import functional as F
 from .clip_model import CLIP
 from .simple_tokenizer import SimpleTokenizer as _Tokenizer
+from .image_prompt_bank import merge_abnormal_prompt_lists
 from sklearn.cluster import KMeans
 
 class ProjectLayer(nn.Module):
@@ -185,13 +186,138 @@ class TextEmbebddingLayer(nn.Module):
 
         return result
 
+    @staticmethod
+    def _dedupe_prompt_list(prompts):
+        cleaned = []
+        seen = set()
+        for prompt in prompts:
+            prompt = str(prompt).strip()
+            if not prompt or prompt in seen:
+                continue
+            seen.add(prompt)
+            cleaned.append(prompt)
+        return cleaned
+
+    def _build_default_prompts(self, text, prompt_states):
+        text = text.replace('-', ' ')
+        prompted_state = [state.format(text) for state in prompt_states]
+        prompted_sentence = []
+        for state in prompted_state:
+            for template in self.prompt_templates:
+                prompted_sentence.append(template.format(state))
+        return prompted_sentence
+
+    def build_default_normal_prompts(self, text):
+        return self._build_default_prompts(text, self.prompt_normal)
+
+    def build_default_abnormal_prompts(self, text):
+        return self._build_default_prompts(text, self.prompt_abnormal)
+
+    @staticmethod
+    def _single_image_path(image_paths):
+        if isinstance(image_paths, (list, tuple)):
+            if len(image_paths) != 1:
+                raise ValueError(
+                    "Per-image JSON abnormal prompts currently require batch_size=1. "
+                    f"Received batch_size={len(image_paths)}"
+                )
+            return image_paths[0]
+        return image_paths
+
+    def _resolve_abnormal_prompts(
+            self,
+            text,
+            image_path,
+            abnormal_prompt_source,
+            abnormal_prompt_mode,
+            abnormal_prompt_fallback,
+            abnormal_prompt_bank,
+    ):
+        if abnormal_prompt_source == "default":
+            return None, None
+        if abnormal_prompt_source != "json":
+            raise ValueError(f"Unsupported abnormal_prompt_source: {abnormal_prompt_source}")
+        if abnormal_prompt_mode not in ("replace", "append"):
+            raise ValueError("abnormal_prompt_mode must be 'replace' or 'append'")
+        if abnormal_prompt_fallback not in ("default", "error"):
+            raise ValueError("abnormal_prompt_fallback must be 'default' or 'error'")
+        if abnormal_prompt_bank is None:
+            raise ValueError("abnormal_prompt_bank is required when abnormal_prompt_source='json'")
+        if image_path is None:
+            raise ValueError("image_path is required when abnormal_prompt_source='json'")
+
+        prompt_info = abnormal_prompt_bank.get_difference_prompts(text, image_path)
+        if prompt_info["found"]:
+            return prompt_info["prompts"], prompt_info
+        if abnormal_prompt_fallback == "default":
+            return None, prompt_info
+        raise KeyError(
+            "Could not resolve JSON difference_prompts for "
+            f"class_name={text}, image_path={image_path}, relative_key={prompt_info['relative_key']}"
+        )
+
+    def _log_image_prompt_resolution(self, prompt_bank, mode, fallback_used, final_prompt_count):
+        if prompt_bank is None:
+            return
+        count = getattr(prompt_bank, "_resolved_debug_count", 0)
+        if count >= getattr(prompt_bank, "debug_limit", 0):
+            return
+        setattr(prompt_bank, "_resolved_debug_count", count + 1)
+        print(f"mode: {mode}")
+        print(f"fallback_used: {fallback_used}")
+        print(f"final_abnormal_prompt_count: {final_prompt_count}")
+
     ## TODO: text layeer is not compitable with multiple batches...
-    def forward(self, model, texts, device):
+    def forward(
+            self,
+            model,
+            texts,
+            device,
+            image_paths=None,
+            abnormal_prompt_source="default",
+            abnormal_prompt_mode="replace",
+            abnormal_prompt_fallback="default",
+            abnormal_prompt_bank=None,
+    ):
         text_feature_list = []
 
         for indx, text in enumerate(texts):
+            image_path = None
+            abnormal_prompts = None
+            prompt_info = None
 
-            if self.fixed:
+            if abnormal_prompt_source == "json":
+                if len(texts) != 1:
+                    raise ValueError(
+                        "Per-image JSON abnormal prompts currently require batch_size=1. "
+                        f"Received batch_size={len(texts)}"
+                    )
+                image_path = self._single_image_path(image_paths)
+                abnormal_prompts, prompt_info = self._resolve_abnormal_prompts(
+                    text,
+                    image_path,
+                    abnormal_prompt_source,
+                    abnormal_prompt_mode,
+                    abnormal_prompt_fallback,
+                    abnormal_prompt_bank,
+                )
+                text_features = self.encode_text(
+                    model,
+                    text,
+                    device,
+                    abnormal_prompts=abnormal_prompts,
+                    abnormal_prompt_mode=abnormal_prompt_mode,
+                )
+                final_prompt_count = len(
+                    self.resolve_final_abnormal_prompt_list(text, abnormal_prompts, abnormal_prompt_mode)
+                )
+                self._log_image_prompt_resolution(
+                    abnormal_prompt_bank,
+                    abnormal_prompt_mode,
+                    prompt_info["fallback_used"] if prompt_info else False,
+                    final_prompt_count,
+                )
+            elif self.fixed:
                 if self.ensemble_text_features.get(text) is None:
                     text_features = self.encode_text(model, text, device)
                     self.ensemble_text_features[text] = text_features
@@ -208,25 +334,32 @@ class TextEmbebddingLayer(nn.Module):
 
         return text_features
 
-    def encode_text(self, model, text, device):
+    def _encode_prompt_list(self, model, prompt_list, device):
+        prompted_sentence = self.tokenize(prompt_list, context_length=77).to(device)
+        class_embeddings = model.encode_text(prompted_sentence)
+        class_embeddings = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
+        class_embedding = class_embeddings.mean(dim=0)
+        class_embedding = class_embedding / class_embedding.norm()
+        return class_embedding
+
+    def resolve_final_abnormal_prompt_list(self, text, abnormal_prompts=None, abnormal_prompt_mode="replace"):
+        default_prompts = self.build_default_abnormal_prompts(text)
+        if abnormal_prompts is None:
+            return default_prompts
+
+        abnormal_prompts = self._dedupe_prompt_list(abnormal_prompts)
+        return merge_abnormal_prompt_lists(default_prompts, abnormal_prompts, abnormal_prompt_mode)
+
+    def encode_text(self, model, text, device, abnormal_prompts=None, abnormal_prompt_mode="replace"):
         text_features = []
-        for i in range(len(self.prompt_state)):
-            text = text.replace('-', ' ')
-            prompted_state = [state.format(text) for state in self.prompt_state[i]]
-            prompted_sentence = []
-            for s in prompted_state:
-                for template in self.prompt_templates:
-                    prompted_sentence.append(template.format(s))
-            prompted_sentence = self.tokenize(prompted_sentence, context_length=77).to(device)
-
-            class_embeddings = model.encode_text(prompted_sentence)
-
-            #class_embeddings /= class_embeddings.norm(dim=-1, keepdim=True)
-            class_embeddings = class_embeddings / class_embeddings.norm(dim=-1, keepdim=True)
-            class_embedding = class_embeddings.mean(dim=0)
-            #class_embedding /= class_embedding.norm()
-            class_embedding = class_embedding / class_embedding.norm()
-            text_features.append(class_embedding)
+        normal_prompt_list = self.build_default_normal_prompts(text)
+        abnormal_prompt_list = self.resolve_final_abnormal_prompt_list(
+            text,
+            abnormal_prompts=abnormal_prompts,
+            abnormal_prompt_mode=abnormal_prompt_mode,
+        )
+        for prompt_list in (normal_prompt_list, abnormal_prompt_list):
+            text_features.append(self._encode_prompt_list(model, prompt_list, device))
 
         text_features = torch.stack(text_features, dim=1)
 
@@ -640,11 +773,13 @@ class AdaCLIP(nn.Module):
         self.prompt_source = prompt_source
         self.prompt_json_path = prompt_json_path
         self.prompt_fallback = prompt_fallback
+        fixed_text_layer = (not self.enable_text_prompt)
+        self.default_text_embedding_layer = TextEmbebddingLayer(fixed=fixed_text_layer)
         if prompt_source == "default":
-            self.text_embedding_layer = TextEmbebddingLayer(fixed=(not self.enable_text_prompt))
+            self.text_embedding_layer = self.default_text_embedding_layer
         elif prompt_source == "json":
             self.text_embedding_layer = JsonPromptTextEmbeddingLayer(
-                fixed=(not self.enable_text_prompt),
+                fixed=fixed_text_layer,
                 prompt_json_path=prompt_json_path,
                 prompt_fallback=prompt_fallback,
             )
@@ -830,7 +965,16 @@ class AdaCLIP(nn.Module):
                 anomaly_maps[i] = torch.softmax(anomaly_maps[i], dim=1)
             return anomaly_maps, anomaly_score
 
-    def extract_feat(self, image, cls_name):
+    def extract_feat(
+            self,
+            image,
+            cls_name,
+            image_path=None,
+            abnormal_prompt_source="default",
+            abnormal_prompt_mode="replace",
+            abnormal_prompt_fallback="default",
+            abnormal_prompt_bank=None,
+    ):
         if 'D' in self.prompting_type:
             self.generate_and_set_dynamic_promtps(image) # generate and set dynamic prompts for corresponding prompters
 
@@ -840,20 +984,51 @@ class AdaCLIP(nn.Module):
             with torch.no_grad():
                 image_features, patch_tokens, _ = self.encode_image(image)
 
+        if abnormal_prompt_source == "json":
+            text_layer = self.default_text_embedding_layer
+            text_kwargs = dict(
+                image_paths=image_path,
+                abnormal_prompt_source=abnormal_prompt_source,
+                abnormal_prompt_mode=abnormal_prompt_mode,
+                abnormal_prompt_fallback=abnormal_prompt_fallback,
+                abnormal_prompt_bank=abnormal_prompt_bank,
+            )
+        else:
+            text_layer = self.text_embedding_layer
+            text_kwargs = {}
+
         if self.enable_text_prompt:
-            text_features = self.text_embedding_layer(self, cls_name, self.device)
+            text_features = text_layer(self, cls_name, self.device, **text_kwargs)
         else:
             with torch.no_grad():
-                text_features = self.text_embedding_layer(self, cls_name, self.device)
+                text_features = text_layer(self, cls_name, self.device, **text_kwargs)
 
         proj_cls_tokens, proj_patch_tokens = self.proj_visual_tokens(image_features, patch_tokens)
 
         return proj_cls_tokens, proj_patch_tokens, text_features
 
     @torch.cuda.amp.autocast()
-    def forward(self, image, cls_name, aggregation=True):
+    def forward(
+            self,
+            image,
+            cls_name,
+            aggregation=True,
+            image_path=None,
+            abnormal_prompt_source="default",
+            abnormal_prompt_mode="replace",
+            abnormal_prompt_fallback="default",
+            abnormal_prompt_bank=None,
+    ):
         # extract features for images and texts
-        image_features, patch_tokens, text_features = self.extract_feat(image, cls_name)
+        image_features, patch_tokens, text_features = self.extract_feat(
+            image,
+            cls_name,
+            image_path=image_path,
+            abnormal_prompt_source=abnormal_prompt_source,
+            abnormal_prompt_mode=abnormal_prompt_mode,
+            abnormal_prompt_fallback=abnormal_prompt_fallback,
+            abnormal_prompt_bank=abnormal_prompt_bank,
+        )
         anomaly_map, anomaly_score = self.visual_text_similarity(image_features, patch_tokens, text_features, aggregation)
 
         if aggregation:
