@@ -10,7 +10,7 @@ import os
 import torch
 
 # Importing from local modules
-from tools import write2csv, setup_paths, setup_seed, log_metrics, Logger
+from tools import REPO_ROOT, resolve_arg_paths, write2csv, setup_paths, setup_seed, log_metrics, Logger
 from dataset import get_data
 from method import AdaCLIP_Trainer
 
@@ -37,7 +37,7 @@ def train(args):
 
     logger.info('Model name: {:}'.format(model_name))
 
-    config_path = os.path.join('./model_configs', f'{args.model}.json')
+    config_path = REPO_ROOT / 'model_configs' / f'{args.model}.json'
 
     # Prepare model
     with open(config_path, 'r') as f:
@@ -152,6 +152,16 @@ def validate_abnormal_prompt_args(args):
             if not os.path.isfile(json_path):
                 raise FileNotFoundError(f"{phase} abnormal prompt JSON does not exist: {json_path}")
 
+
+def resolve_runtime_paths(args):
+    return resolve_arg_paths(args, (
+        "save_path",
+        "ckt_path",
+        "prompt_json_path",
+        "train_abnormal_prompt_json_path",
+        "test_abnormal_prompt_json_path",
+    ))
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser("AdaCLIP", add_help=True)
 
@@ -218,7 +228,11 @@ if __name__ == '__main__':
                         help="Number of per-image JSON prompt resolutions to print for debugging.")
 
     args = parser.parse_args()
+    resolve_runtime_paths(args)
     validate_abnormal_prompt_args(args)
+
+    print(f"[Paths] repo_root: {REPO_ROOT}")
+    print(f"[Paths] save_path: {args.save_path}")
 
     if args.batch_size != 1:
         raise NotImplementedError(

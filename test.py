@@ -12,7 +12,7 @@ from scipy.ndimage import gaussian_filter
 import cv2
 
 # Importing from local modules
-from tools import write2csv, setup_seed, Logger
+from tools import REPO_ROOT, resolve_arg_paths, write2csv, setup_seed, Logger
 from dataset import get_data, dataset_dict
 from method import AdaCLIP_Trainer
 from PIL import Image
@@ -31,14 +31,15 @@ def train(args):
     save_fig = args.save_fig
 
     # Logger
-    logger = Logger('log.txt')
+    os.makedirs(args.save_path, exist_ok=True)
+    logger = Logger(os.path.join(args.save_path, 'test.log'))
 
     # Print basic information
     for key, value in sorted(vars(args).items()):
         logger.info(f'{key} = {value}')
 
 
-    config_path = os.path.join('./model_configs', f'{args.model}.json')
+    config_path = REPO_ROOT / 'model_configs' / f'{args.model}.json'
 
     # Prepare model
     with open(config_path, 'r') as f:
@@ -169,6 +170,16 @@ def validate_abnormal_prompt_args(args):
                 f"test abnormal prompt JSON does not exist: {args.test_abnormal_prompt_json_path}"
             )
 
+
+def resolve_runtime_paths(args):
+    return resolve_arg_paths(args, (
+        "save_path",
+        "ckt_path",
+        "image_path",
+        "prompt_json_path",
+        "test_abnormal_prompt_json_path",
+    ))
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser("AdaCLIP", add_help=True)
 
@@ -237,7 +248,11 @@ if __name__ == '__main__':
                         help="Number of per-image JSON prompt resolutions to print for debugging.")
 
     args = parser.parse_args()
+    resolve_runtime_paths(args)
     validate_abnormal_prompt_args(args)
+
+    print(f"[Paths] repo_root: {REPO_ROOT}")
+    print(f"[Paths] save_path: {args.save_path}")
 
     if args.batch_size != 1:
         raise NotImplementedError(
