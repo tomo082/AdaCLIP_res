@@ -23,6 +23,8 @@ def _find_mask(root, class_name, defect_type, image_path):
     candidates = [
         mask_dir / f"{image_path.stem}_mask.png",
         mask_dir / f"{image_path.stem}.png",
+        # Official MVTec LOCO stores each mask in <image_stem>/000.png.
+        mask_dir / image_path.stem / "000.png",
     ]
     for candidate in candidates:
         if candidate.is_file():

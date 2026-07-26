@@ -1,4 +1,5 @@
 from .mvtec import MVTEC_CLS_NAMES, MVTecDataset, MVTEC_ROOT
+from .mvtecloco import MVTECLOCO_CLS_NAMES, MVTecLOCODataset, MVTECLOCO_ROOT
 from .visa import VISA_CLS_NAMES, VisaDataset, VISA_ROOT
 from .mpdd import MPDD_CLS_NAMES, MPDDDataset, MPDD_ROOT
 from .btad import BTAD_CLS_NAMES, BTADDataset, BTAD_ROOT
@@ -26,6 +27,9 @@ dataset_dict = {
     'isic': (ISIC_CLS_NAMES, ISICDataset, ISIC_ROOT),
     'mpdd': (MPDD_CLS_NAMES, MPDDDataset, MPDD_ROOT),
     'mvtec': (MVTEC_CLS_NAMES, MVTecDataset, MVTEC_ROOT),
+    'mvtecloco': (MVTECLOCO_CLS_NAMES, MVTecLOCODataset, MVTECLOCO_ROOT),
+    'mvtec_loco': (MVTECLOCO_CLS_NAMES, MVTecLOCODataset, MVTECLOCO_ROOT),
+    'mvtec-loco': (MVTECLOCO_CLS_NAMES, MVTecLOCODataset, MVTECLOCO_ROOT),
     'sdd': (SDD_CLS_NAMES, SDDDataset, SDD_ROOT),
     'tn3k': (TN3K_CLS_NAMES, TN3KDataset, TN3K_ROOT),
     'visa': (VISA_CLS_NAMES, VisaDataset, VISA_ROOT),
