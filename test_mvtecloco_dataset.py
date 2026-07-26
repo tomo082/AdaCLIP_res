@@ -1,10 +1,16 @@
+import importlib.util
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
 from PIL import Image
 
-from dataset.mvtec_layout import build_mvtec_style_meta
+
+MODULE_PATH = Path(__file__).resolve().parent / 'dataset' / 'mvtec_layout.py'
+SPEC = importlib.util.spec_from_file_location('mvtec_layout_for_test', MODULE_PATH)
+MVTEC_LAYOUT = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MVTEC_LAYOUT)
+build_mvtec_style_meta = MVTEC_LAYOUT.build_mvtec_style_meta
 
 
 CLASS_NAME = 'breakfast_box'
