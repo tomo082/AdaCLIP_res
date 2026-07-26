@@ -59,6 +59,7 @@ Note: some links are still in processing...
 | Dataset | Google Drive | Baidu Drive | Task
 |------------|------------------|------------------| ------------------|
 | MVTec AD    | [Google Drive](https://drive.google.com/file/d/12IukAqxOj497J4F0Mel-FvaONM030qwP/view?usp=drive_link) | [Baidu Drive](https://pan.baidu.com/s/1k36IMP4w32hY9BXOUM5ZmA?pwd=kxud) | Anomaly Detection & Localization |
+| MVTec LOCO AD | [Official Dataset](https://www.mvtec.com/company/research/datasets/mvtec-loco) | - | Anomaly Detection & Localization |
 | VisA    | [Google Drive](https://drive.google.com/file/d/1U0MZVro5yGgaHNQ8kWb3U1a0Qlz4HiHI/view?usp=drive_link) | [Baidu Drive](https://pan.baidu.com/s/15CIsP-ulZ1AN0_3quA068w?pwd=lmgc) | Anomaly Detection & Localization |
 | MPDD    | [Google Drive](https://drive.google.com/file/d/1cLkZs8pN8onQzfyNskeU_836JLjrtJz1/view?usp=drive_link) | [Baidu Drive](https://pan.baidu.com/s/11T3mkloDCl7Hze5znkXOQA?pwd=4p7m) | Anomaly Detection & Localization | 
 | BTAD    | [Google Drive](https://drive.google.com/file/d/19Kd8jJLxZExwiTc9__6_r_jPqkmTXt4h/view?usp=drive_link) | [Baidu Drive](https://pan.baidu.com/s/1f4Tq-EXRz6iAswygH2WbFg?pwd=a60n) | Anomaly Detection & Localization |
@@ -146,6 +147,30 @@ CUDA_VISIBLE_DEVICES=0 python test.py \
   --prompt_source json \
   --prompt_json_path ./prompts/llava_normal_aware_prompts_mvtec_4shot.json
 ```
+
+### Evaluate MVTec LOCO AD
+
+The official MVTec LOCO directory layout is supported directly, including
+nested masks such as `ground_truth/logical_anomalies/<image_stem>/000.png`.
+Set the dataset root with `ADACLIP_MVTECLOCO_ROOT` and use
+`--testing_data mvtecloco`:
+
+```shell
+ADACLIP_MVTECLOCO_ROOT=/data/home/ueno/mvtec_loco_anomaly_detection \
+CUDA_VISIBLE_DEVICES=0 python test.py \
+  --testing_model dataset \
+  --testing_data mvtecloco \
+  --ckt_path /path/to/pretrained_model.pth \
+  --model ViT-L-14-336 \
+  --image_size 336 \
+  --batch_size 1 \
+  --save_fig True \
+  --save_path ./workspaces/adaclip/mvtecloco_eval
+```
+
+The aliases `mvtec_loco` and `mvtec-loco` are also accepted. The evaluated
+classes are `breakfast_box`, `juice_bottle`, `pushpins`, `screw_bag`,
+and `splicing_connectors`.
 
 ## Main Results
 
